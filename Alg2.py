@@ -16,7 +16,7 @@ import gc
 
 wandb.init(project="StoMuZero")
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.float
 
 ### network
@@ -205,7 +205,7 @@ class VQ_VAE(nn.Module):
    
 class MCTS_Node():
 
-    def __init__(self, p):
+    def __init__(self, p, is_chance = False):
         super().__init__()
         
         self.reward = 0
@@ -213,7 +213,11 @@ class MCTS_Node():
         self.is_chance = False
         self.edges = {}
         self.value_sum = 0
+        self.is_chance = is_chance
         self.visits = 0
+
+    def expanded(self):
+        return len(self.edges) > 0
         
     def search_value(self):
         if self.visits == 0:
@@ -242,75 +246,55 @@ class MCTS():
         p, v = self.agent.f(root_state)
         self.root = self.init_root(p[0].detach().cpu().numpy())
         
-        a = np.zeros(23,dtype=int)
         # run simulations and save trajectory
-        for i in range(num_simulations):
+        for _ in range(num_simulations):
             state = root_state
             self.node_trajectory = [self.root]
             node = self.root
+            self.action_trajectory = []
+            while node.expanded():
+                action, node = self.upper_confidence_bound(node)
+                self.node_trajectory.append(node)
+                self.action_trajectory.append(action)
+            parent = self.node_trajectory[-2]
             
-            action, node = self.upper_confidence_bound(node)
-            self.node_trajectory.append(node)
-            state = self.agent.phi(state, torch.tensor([action]).to(device))
-            p, v = self.agent.psi(state) # p = sigma
-            r = torch.tensor(0.).to(device)
-            self.expand(node, p, r, True, 32)
-            a[action] += 1
-            self.backup(v)
+            if parent.is_chance:
+                state, r = self.agent.g(state, F.one_hot(torch.tensor(action).to(device),32)[np.newaxis, :])
+                p, v = self.agent.f(state)
+                is_child_chance = False
+                a = self.num_actions
+            else:
+                state = self.agent.phi(state, torch.tensor([action]).to(device))
+                p, v = self.agent.psi(state) # p = sigma
+                a = 32
+                r = 0.0
+                is_child_chance = True
             
-            action, node = self.upper_confidence_bound(node)
-            self.node_trajectory.append(node)
-            state, r = self.agent.g(state, F.one_hot(torch.tensor(action).to(device),32)[np.newaxis, :])
-            p, v = self.agent.f(state)
-            self.expand(node, p, r, False, self.num_actions)
-            self.backup(v)
-            
-            action, node = self.upper_confidence_bound(node)
-            self.node_trajectory.append(node)
-            state = self.agent.phi(state, torch.tensor([action]).to(device))
-            p, v = self.agent.psi(state) # p = sigma
-            r = torch.tensor(0.).to(device)
-            self.expand(node, p, r, True, 32)
-            self.backup(v)
-            
-            action, node = self.upper_confidence_bound(node)
-            self.node_trajectory.append(node)
-            state, r = self.agent.g(state, F.one_hot(torch.tensor(action).to(device),32)[np.newaxis, :])
-            p, v = self.agent.f(state)
-            self.expand(node, p, r, False, self.num_actions)
-            self.backup(v)
-            
-            action, node = self.upper_confidence_bound(node)
-            self.node_trajectory.append(node)
-            state = self.agent.phi(state, torch.tensor([action]).to(device))
-            p, v = self.agent.psi(state) # p = sigma
-            r = torch.tensor(0.).to(device)
-            self.expand(node, p, r, True, 32)
-            self.backup(v)
-            
-            action, node = self.upper_confidence_bound(node)
-            self.node_trajectory.append(node)
-            state, r = self.agent.g(state, F.one_hot(torch.tensor(action).to(device),32)[np.newaxis, :])
-            p, v = self.agent.f(state)
-            self.expand(node, p, r, False, self.num_actions)
-            self.backup(v)
+            self.expand(node, p[0].detach().cpu().numpy(), r, is_child_chance, a)
+            self.backup(v.detach())      
 
-        return a, self.root.search_value()
+        return self.get_pi(), self.root.search_value()
      
     def expand(self, node, p, r, is_chance, n):
-        p, r = p[0].detach().cpu().numpy(), r.detach()
         node.reward = r
         node.is_chance = is_chance
         for i in range(n):
             node.edges[i] = MCTS_Node(p[i])
-
     
     def backup(self, value):
-        value = value.detach()
         for node in reversed(self.node_trajectory):
             node.value_sum += value
             node.visits += 1
             value = node.reward + self.gamma * value
+
+    def get_pi(self):
+        
+        edge_visits = []
+        for i in range(self.num_actions):
+            edge_visits.append(self.root.edges[i].visits)
+        edge_visits = np.array(edge_visits)
+        
+        return edge_visits
             
     def upper_confidence_bound(self, node):
         ucb_scores = []
@@ -581,7 +565,7 @@ class Env_Runner:
             self.dones.append(done)
         #self.env.render()
         wandb.log({"totalepi": self.total_eps,"return": rewards,"return+": allrewards, "depth":dep, "level":lev})
-        print(self.total_eps,rewards,"\t\t\t\t\t",dep,"\t\t\t\t\t",allrewards,"\t\t\t\t\t",lev)
+        print(self.total_eps,rewards,"\t\t\t",dep,"\t\t\t",allrewards,"\t\t\t",lev)
         self.total_eps += 1
         return self.make_trajectory()
         
@@ -672,10 +656,10 @@ class MuZero_Agent(nn.Module):
 ### train      
 def train():
     
-    history_length = 8
-    num_simulations = 12
-    replay_capacity = 96
-    batch_size = 64
+    history_length = 4
+    num_simulations = 30
+    replay_capacity = 16
+    batch_size = 32
     k = 5
     n = 10
     lr = 0.01
@@ -708,7 +692,7 @@ def train():
         #############
         # do update #
         #############
-        if len(replay) < 15:
+        if len(replay) < 3:
             continue
             
         if episode < 500:
@@ -781,23 +765,24 @@ def train():
             wandb.log({'policy loss': policy_loss, 'value loss': value_loss, 'reward loss': reward_loss, 'q loss': q_loss, 'sigma loss':sigma_loss, 'vq loss': vq_loss, 'loss': loss})
             loss.backward()
             optimizer.step() 
-        model_path = 'representation2.pth'
+        model_path = 're.pth'
         torch.save(representation_model.state_dict(), model_path)
-        model_path = 'dynamics2.pth'
+        model_path = 'dy.pth'
         torch.save(dynamics_model.state_dict(), model_path)
-        model_path = 'prediction2.pth'
+        model_path = 'pr.pth'
         torch.save(prediction_model.state_dict(), model_path)
-        model_path = 'afterstatedynamics2.pth'
+        model_path = 'ad.pth'
         torch.save(afterstatedynamics_model.state_dict(), model_path)
-        model_path = 'afterstateprediction2.pth'
+        model_path = 'apr.pth'
         torch.save(afterstateprediction_model.state_dict(), model_path)
-        model_path = 'vq_vae2.pth'
+        model_path = 'vq.pth'
         torch.save(vq_vae .state_dict(), model_path)
     print("eval")
     for episode in range(100):
         # act and get data
         agent.temperature = 0.1
-        trajectory = runner.run(agent)        
+        trajectory = runner.run(agent)  
+        
 if __name__ == "__main__":
 
     train()
