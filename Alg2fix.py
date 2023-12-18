@@ -10,13 +10,13 @@ import torch.nn.functional as F
 import time
 import os
 import math
-#import wandb
+import wandb
 #import cv2
 import gc
 
-#wandb.init(project="StoMuZero")
+wandb.init(project="StoMuZero")
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 dtype = torch.float
 
 ### network
@@ -270,20 +270,18 @@ class MCTS():
                 r = 0.0
                 is_child_chance = True
             
-            self.expand(node, p, r, is_child_chance, a)
-            self.backup(v)      
+            self.expand(node, p[0].detach().cpu().numpy(), r, is_child_chance, a)
+            self.backup(v.detach())      
 
         return self.get_pi(), self.root.search_value()
      
     def expand(self, node, p, r, is_chance, n):
-        p = p[0].detach().cpu().numpy()#, r.detach()
         node.reward = r
         node.is_chance = is_chance
         for i in range(n):
             node.edges[i] = MCTS_Node(p[i])
     
     def backup(self, value):
-        #value = value.detach()
         for node in reversed(self.node_trajectory):
             node.value_sum += value
             node.visits += 1
@@ -566,8 +564,8 @@ class Env_Runner:
             self.rewards.append(torch.tensor(r+addp))
             self.dones.append(done)
         #self.env.render()
-        #wandb.log({"totalepi": self.total_eps,"return": rewards,"return+": allrewards, "depth":dep, "level":lev})
-        print(self.total_eps,rewards,"\t\t\t\t\t",dep,"\t\t\t\t\t",allrewards,"\t\t\t\t\t",lev)
+        wandb.log({"totalepi": self.total_eps,"return": rewards,"return+": allrewards, "depth":dep, "level":lev})
+        print(self.total_eps,rewards,"\t\t\t",dep,"\t\t\t",allrewards,"\t\t\t",lev)
         self.total_eps += 1
         return self.make_trajectory()
         
@@ -627,7 +625,7 @@ class MuZero_Agent(nn.Module):
         search_policy = child_visits/np.sum(child_visits)
         act_policy = (child_visits ** (1/self.temperature)) / np.sum(child_visits ** (1/self.temperature))
         action = np.random.choice(self.num_actions, 1, p=act_policy)
-        #wandb.log({"v":v,"action":action})
+        wandb.log({"v":v,"action":action})
         return action[0], search_policy, v
   
     def h(self,obs):
@@ -658,10 +656,10 @@ class MuZero_Agent(nn.Module):
 ### train      
 def train():
     
-    history_length = 8
-    num_simulations = 50
-    replay_capacity = 96
-    batch_size = 64
+    history_length = 4
+    num_simulations = 30
+    replay_capacity = 16
+    batch_size = 32
     k = 5
     n = 10
     lr = 0.01
@@ -694,7 +692,7 @@ def train():
         #############
         # do update #
         #############
-        if len(replay) < 15:
+        if len(replay) < 3:
             continue
             
         if episode < 500:
@@ -764,26 +762,27 @@ def train():
                 sigma_loss += 20*mse_loss(sigma, code.detach())
                 vq_loss += min(20*mse_loss(code[step-1], bcode[step-1]),25)
             loss = policy_loss + value_loss + reward_loss + q_loss + sigma_loss + vq_loss
-            #wandb.log({'policy loss': policy_loss, 'value loss': value_loss, 'reward loss': reward_loss, 'q loss': q_loss, 'sigma loss':sigma_loss, 'vq loss': vq_loss, 'loss': loss})
+            wandb.log({'policy loss': policy_loss, 'value loss': value_loss, 'reward loss': reward_loss, 'q loss': q_loss, 'sigma loss':sigma_loss, 'vq loss': vq_loss, 'loss': loss})
             loss.backward()
             optimizer.step() 
-        model_path = 'representation2.pth'
+        model_path = 're.pth'
         torch.save(representation_model.state_dict(), model_path)
-        model_path = 'dynamics2.pth'
+        model_path = 'dy.pth'
         torch.save(dynamics_model.state_dict(), model_path)
-        model_path = 'prediction2.pth'
+        model_path = 'pr.pth'
         torch.save(prediction_model.state_dict(), model_path)
-        model_path = 'afterstatedynamics2.pth'
+        model_path = 'ad.pth'
         torch.save(afterstatedynamics_model.state_dict(), model_path)
-        model_path = 'afterstateprediction2.pth'
+        model_path = 'apr.pth'
         torch.save(afterstateprediction_model.state_dict(), model_path)
-        model_path = 'vq_vae2.pth'
+        model_path = 'vq.pth'
         torch.save(vq_vae .state_dict(), model_path)
     print("eval")
     for episode in range(100):
         # act and get data
         agent.temperature = 0.1
-        trajectory = runner.run(agent)        
+        trajectory = runner.run(agent)  
+        
 if __name__ == "__main__":
 
     train()
